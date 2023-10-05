@@ -1,88 +1,74 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union, Annotated
+
+import jwt
+from fastapi.security import OAuth2PasswordBearer
+from fastapi_users import FastAPIUsers
+from pydantic import BaseModel, Field
+
+from fastapi import FastAPI, Request, status, Depends, Header
 from fastapi.encoders import jsonable_encoder
-from fastapi import FastAPI, Request, status
-from pydantic import BaseModel, Field, ValidationError
+from fastapi.exceptions import ResponseValidationError, HTTPException
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import ResponseValidationError
+
+from auth.auth import auth_backend, SECRET
+from auth.database import User
+from auth.manager import get_user_manager
+from auth.schemas import UserRead, UserCreate
+
 app = FastAPI(
     title="Trading App"
 )
 
-@app.exception_handler(ResponseValidationError)
-async def validation_exception_handler(request: Request, exc: ResponseValidationError):
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=jsonable_encoder({'detail': exc.errors()})
-    )
+fastapi_users = FastAPIUsers[User, int](
+    get_user_manager,
+    [auth_backend],
+)
 
-fake_users = [
-    {'id': 1, 'role': 'admin', 'name': ['BOb']},
-    {'id': 2, 'role': 'investor', 'name': 'John'},
-    {'id': 3, 'role': 'trader', 'name': 'Matt'},
-]
+app.include_router(
+    fastapi_users.get_auth_router(auth_backend),
+    prefix="/auth/jwt",
+    tags=["auth"],
+)
 
+app.include_router(
+    fastapi_users.get_register_router(UserRead, UserCreate),
+    prefix="/auth",
+    tags=["auth"],
+)
 
-class DegreeType(Enum):
-    newbie = "newbie"
-    expert = 'expert'
+# def fake_decode_token(token):
+#     # This doesn't provide any security at all
+#     # Check the next version
+#     user = get_user(fake_users_db, token)
+#     return user
 
+oauth2_scheme = fastapi_users.current_user()
+# @app.get("/protected-route")
+# async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
+#     # user = fake_decode_token(token)
+#     # if not user:
+#     #     raise HTTPException(
+#     #     status_code=status.HTTP_401_UNAUTHORIZED,
+#     #     detail="Invalid authentication credentials",
+#     #     headers={"WWW-Authenticate": "Bearer"},
+#     #     )
+#     return 'user'
 
-class Degree(BaseModel):
-    id: int
-    created_at: datetime
-    type_degree: str
-
-
-class User(BaseModel):
-    id: int
-    role: str
-    name: str
-    # degree: Optional[List[Degree]]
-
-
-@app.get('/users/{user_id}', response_model=List[User])
-def get_user(user_id: int):
-    return [user for user in fake_users if user.get('id') == user_id]
-
-
-fake_trades = [
-    {'id': 1, 'user_id': 1, 'currence': 'BTC', 'side': 'Buy'},
-    {'id': 2, 'user_id': 1, 'currence': 'BTC', 'side': 'Buy'},
-    {'id': 3, 'user_id': 1, 'currence': 'BTC', 'side': 'Buy'},
-]
+async def get_enabled_backends(request: Request):
+    """Return the enabled dependencies following custom logic."""
+    if request.url.path == "/protected-route-only-jwt":
+        return [auth_backend]
 
 
-@app.get("/trades")
-def get_trades(limit: int = 1, offset: int = 0):
-    return fake_trades[offset:][:limit]
+current_active_user = fastapi_users.current_user(active=True, get_enabled_backends=get_enabled_backends)
+
+@app.get("/protected-route-only-jwt")
+def protected_route(user: User = Depends(current_active_user)):
+    return f"Hello, {user.email}. You are authenticated with a JWT."
 
 
-fake_users2 = [
-    {'id': 1, 'role': 'admin', 'name': ['BOb']},
-    {'id': 2, 'role': 'investor', 'name': 'John'},
-    {'id': 3, 'role': 'trader', 'name': 'Matt'},
-]
-
-
-@app.post('/users/{user_id}')
-def update_user(user_id: int, new_name: str):
-    current_user = list(filter(lambda user: user.get('id') == user_id, fake_users2))[0]
-    current_user['name'] = new_name
-    return {'status': 200, 'data': current_user}
-
-
-class Trade(BaseModel):
-    id: int
-    user_id: int
-    currency: str = Field(max_length=5)
-    side: str
-    price: float = Field(ge=0)
-    amount: float
-
-
-@app.post("/trades")
-def add_trades(trades: List[Trade]):
-    fake_trades.extend(trades)
-    return {'status': 200, 'data': fake_trades}
+@app.get("/unprotected-route")
+def unprotected_route():
+    return f"Hello, anonym"
